@@ -1,0 +1,13 @@
+{
+  "name": "guerra-contact-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Contact form backend for guerramanagementgroup.com",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.16"
+  }
+}
