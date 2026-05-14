@@ -11,6 +11,47 @@ const rateLimitMap = new Map();
 const RATE_LIMIT_MAX = 5;             // 5 submissions
 const RATE_LIMIT_WINDOW_MS = 60_000;  // per minute, per IP
 
+// Disable Vercel's default body parser so we can read raw body for FormData
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+async function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+function parseUrlEncoded(str) {
+  const params = new URLSearchParams(str);
+  const obj = {};
+  for (const [k, v] of params.entries()) obj[k] = v;
+  return obj;
+}
+
+function parseMultipart(buf, boundary) {
+  const obj = {};
+  const text = buf.toString("utf8");
+  const parts = text.split(`--${boundary}`);
+  for (const part of parts) {
+    const nameMatch = part.match(/name="([^"]+)"/);
+    if (!nameMatch) continue;
+    const name = nameMatch[1];
+    const splitIdx = part.indexOf("\r\n\r\n");
+    if (splitIdx === -1) continue;
+    let value = part.slice(splitIdx + 4);
+    // Trim trailing \r\n and any closing boundary marker
+    value = value.replace(/\r\n--\s*$/, "").replace(/\r\n$/, "");
+    obj[name] = value;
+  }
+  return obj;
+}
+
 export default async function handler(req, res) {
   const origin = req.headers.origin || "";
   const allowed = ALLOWED_ORIGINS.includes(origin);
@@ -46,12 +87,27 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: "Too many submissions. Please try again in a minute." });
   }
 
-  // Parse body (Vercel auto-parses JSON; form-data we handle manually)
-  let data = req.body || {};
-  if (typeof data === "string") {
-    try { data = JSON.parse(data); } catch { data = {}; }
+  // Parse body based on content-type
+  let data = {};
+  try {
+    const ct = (req.headers["content-type"] || "").toLowerCase();
+    const raw = await readRawBody(req);
+
+    if (ct.includes("application/json")) {
+      data = JSON.parse(raw.toString("utf8") || "{}");
+    } else if (ct.includes("application/x-www-form-urlencoded")) {
+      data = parseUrlEncoded(raw.toString("utf8"));
+    } else if (ct.includes("multipart/form-data")) {
+      const boundaryMatch = ct.match(/boundary=(.+)$/);
+      if (boundaryMatch) data = parseMultipart(raw, boundaryMatch[1].trim());
+    } else {
+      // Last resort: try JSON
+      try { data = JSON.parse(raw.toString("utf8") || "{}"); } catch { data = {}; }
+    }
+  } catch (e) {
+    console.error("Body parse error:", e);
+    return res.status(400).json({ error: "Could not parse submission." });
   }
-  if (data instanceof Object === false) data = {};
 
   const name     = String(data.name     || "").trim();
   const email    = String(data.email    || "").trim();
@@ -67,6 +123,7 @@ export default async function handler(req, res) {
 
   // Validation
   if (!name || !email || !venture || !message) {
+    console.log("Missing fields. Received:", { name: !!name, email: !!email, venture: !!venture, message: !!message });
     return res.status(400).json({ error: "Please fill in all required fields." });
   }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
